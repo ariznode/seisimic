@@ -1,0 +1,39 @@
+[project]
+name = "deploy"
+version = "0.1.0"
+description = "Add your description here"
+requires-python = ">=3.13"
+dependencies = [
+    "ruff>=0.8.0",
+    "certifi>=2025.10.5",
+    "charset-normalizer>=3.4.4",
+    "click>=8.3.0",
+    "idna>=3.11",
+    "mypy-extensions>=1.1.0",
+    "packaging>=25.0",
+    "pathspec>=0.12.1",
+    "platformdirs>=4.5.0",
+    "pyright>=1.1.406",
+    "requests>=2.32.5",
+    "urllib3>=2.5.0",
+]
+
+[tool.ruff]
+line-length = 88
+target-version = "py313"
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+]
+ignore = []
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
