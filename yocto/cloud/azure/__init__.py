@@ -3,11 +3,10 @@ Azure deployment utilities.
 
 This package contains all Azure-specific functionality including:
 - defaults: Default constants for Azure deployments
-- api: Azure CLI wrapper and deployment functions
+- api: Azure API wrapper and deployment functions
 """
 
-from yocto.azure.api import AzureCLI, confirm, create_base_parser, get_disk_size
-from yocto.azure.defaults import (
+from yocto.cloud.azure.defaults import (
     CONSENSUS_PORT,
     DEFAULT_CERTBOT_EMAIL,
     DEFAULT_DOMAIN_NAME,
@@ -18,11 +17,6 @@ from yocto.azure.defaults import (
 )
 
 __all__ = [
-    # API functions and classes
-    "AzureCLI",
-    "confirm",
-    "create_base_parser",
-    "get_disk_size",
     # Default constants
     "CONSENSUS_PORT",
     "DEFAULT_CERTBOT_EMAIL",

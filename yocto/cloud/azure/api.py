@@ -4,55 +4,33 @@ Azure API functionality.
 Azure CLI wrapper and deployment functions.
 """
 
-import argparse
 import json
 import logging
 import os
 import subprocess
 import tempfile
+import time
 from pathlib import Path
 
-from yocto.azure.defaults import (
+from yocto.cloud.azure.defaults import (
     CONSENSUS_PORT,
-    DEFAULT_CERTBOT_EMAIL,
-    DEFAULT_DOMAIN_NAME,
-    DEFAULT_DOMAIN_RESOURCE_GROUP,
-    DEFAULT_REGION,
-    DEFAULT_RESOURCE_GROUP,
-    DEFAULT_VM_SIZE,
 )
-from yocto.conf.conf import DeployConfigs, VmConfigs
+from yocto.cloud.cloud_api import CloudApi
+from yocto.cloud.cloud_config import CloudProvider
+from yocto.cloud.cloud_parser import confirm
+from yocto.config import DeployConfigs, VmConfigs
 
 logger = logging.getLogger(__name__)
 
 
 # Disk Operations
-def get_disk_size(disk_path: Path) -> int:
-    """Get disk size in bytes."""
-    return disk_path.stat().st_size
+class AzureApi(CloudApi):
+    """Azure implementation of CloudApi."""
 
-
-class AzureCLI:
-    """Wrapper for Azure CLI commands."""
-
-    @staticmethod
-    def run_command(
-        cmd: list[str],
-        show_logs: bool = False,
-    ) -> subprocess.CompletedProcess:
-        """Execute an Azure CLI command."""
-        try:
-            result = subprocess.run(
-                cmd,
-                capture_output=not show_logs,
-                text=True,
-                check=True,
-            )
-            return result
-        except subprocess.CalledProcessError as e:
-            logger.info(f"Command failed: {' '.join(cmd)}")
-            logger.info(f"Error: {e.stderr}")
-            raise
+    @classmethod
+    def get_cloud_provider(cls) -> CloudProvider:
+        """Return the CloudProvider enum for this API."""
+        return CloudProvider.AZURE
 
     @staticmethod
     def check_dependencies():
@@ -60,7 +38,9 @@ class AzureCLI:
         tools = ["az", "azcopy"]
         for tool in tools:
             try:
-                subprocess.run([tool, "--version"], capture_output=True, check=True)
+                subprocess.run(
+                    [tool, "--version"], capture_output=True, check=True
+                )
             except (subprocess.CalledProcessError, FileNotFoundError) as e:
                 raise RuntimeError(
                     f"Error: '{tool}' command not found. Please install {tool}."
@@ -90,11 +70,15 @@ class AzureCLI:
             logger.info(f"Resource group {name} already exists")
         else:
             confirm(f"create genesis resource group: {name} in {location}")
-            logger.info(f"Creating genesis IP resource group: {name} in {location}")
+            logger.info(
+                f"Creating genesis IP resource group: {name} in {location}"
+            )
             cls.create_resource_group(name, location)
 
     @classmethod
-    def create_public_ip(cls, name: str, resource_group: str) -> str:
+    def create_public_ip(
+        cls, name: str, resource_group: str, location: str
+    ) -> str:
         """Create a static public IP address and return it."""
         logger.info(f"Creating static public IP address: {name}")
         cmd = [
@@ -106,6 +90,8 @@ class AzureCLI:
             resource_group,
             "--name",
             name,
+            "--location",
+            location,
             "--version",
             "IPv4",
             "--sku",
@@ -172,7 +158,9 @@ class AzureCLI:
             "tsv",
         ]
         result = cls.run_command(cmd)
-        return result.stdout.strip().split("\n") if result.stdout.strip() else []
+        return (
+            result.stdout.strip().split("\n") if result.stdout.strip() else []
+        )
 
     @classmethod
     def remove_dns_ip(cls, config: DeployConfigs, ip_address: str) -> None:
@@ -203,9 +191,8 @@ class AzureCLI:
     @classmethod
     def add_dns_ip(cls, config: DeployConfigs, ip_address: str) -> None:
         """Add IP to DNS A record."""
-        logger.info(
-            f"Mapping {config.domain.record}.{config.domain.name} to {ip_address}"
-        )
+        domain = f"{config.domain.record}.{config.domain.name}"
+        logger.info(f"Mapping {domain} to {ip_address}")
         cmd = [
             "az",
             "network",
@@ -243,7 +230,17 @@ class AzureCLI:
         cls.add_dns_ip(config, ip_address)
 
     @classmethod
+    def get_disk_name(cls, config: DeployConfigs, image_path: Path) -> str:
+        """Get the disk name for a given config and image path.
+
+        For Azure, no sanitization is needed, so we use the raw disk
+        name directly.
+        """
+        return cls.get_raw_disk_name(config.vm.name, image_path.name)
+
+    @classmethod
     def disk_exists(cls, config: DeployConfigs, image_path: Path) -> bool:
+        disk_name = cls.get_disk_name(config, image_path)
         cmd = [
             "az",
             "disk",
@@ -253,12 +250,17 @@ class AzureCLI:
         ]
         result = cls.run_command(cmd, show_logs=False)
         disks = json.loads(result.stdout)
-        return any(config.vm.disk_name(image_path) == d["name"] for d in disks)
+        return any(disk_name == d["name"] for d in disks)
 
     @classmethod
-    def create_disk(cls, config: DeployConfigs, image_path: Path) -> None:
-        """Create a managed disk for upload."""
-        disk_size = get_disk_size(image_path)
+    def create_disk(cls, config: DeployConfigs, image_path: Path) -> str:
+        """Create a managed disk for upload.
+
+        Returns:
+            The disk name that was created
+        """
+        disk_size = image_path.stat().st_size
+        disk_name = cls.get_disk_name(config, image_path)
 
         logger.info("Creating disk")
         cmd = [
@@ -266,7 +268,7 @@ class AzureCLI:
             "disk",
             "create",
             "-n",
-            config.vm.disk_name(image_path),
+            disk_name,
             "-g",
             config.vm.resource_group,
             "-l",
@@ -285,9 +287,10 @@ class AzureCLI:
             "V2",
         ]
         cls.run_command(cmd, show_logs=config.show_logs)
+        return disk_name
 
     @classmethod
-    def grant_disk_access(cls, config: DeployConfigs, image_path: Path) -> str:
+    def _grant_disk_access(cls, config: DeployConfigs, image_path: Path) -> str:
         # Grant access
         logger.info("Granting access")
         cmd = [
@@ -295,7 +298,7 @@ class AzureCLI:
             "disk",
             "grant-access",
             "-n",
-            config.vm.disk_name(image_path),
+            cls.get_disk_name(config, image_path),
             "-g",
             config.vm.resource_group,
             "--access-level",
@@ -310,9 +313,18 @@ class AzureCLI:
         return sas_data["accessSas"]
 
     @classmethod
-    def delete_disk(cls, resource_group: str, vm_name: str, artifact: str):
-        disk_name = VmConfigs.get_disk_name(vm_name, artifact)
-        logger.info(f"Deleting disk {disk_name} from resource group {resource_group}")
+    def delete_disk(
+        cls, resource_group: str, vm_name: str, artifact: str, zone: str
+    ):
+        """Delete a disk.
+
+        Note: zone parameter is unused for Azure, but included for API
+        consistency with GCP.
+        """
+        disk_name = cls.get_raw_disk_name(vm_name, artifact)
+        logger.info(
+            f"Deleting disk {disk_name} from resource group {resource_group}"
+        )
         cmd = [
             "az",
             "disk",
@@ -326,7 +338,7 @@ class AzureCLI:
         cls.run_command(cmd, show_logs=True)
 
     @classmethod
-    def copy_disk(
+    def _copy_disk(
         cls,
         image_path: Path,
         sas_uri: str,
@@ -338,7 +350,9 @@ class AzureCLI:
         cls.run_command(cmd, show_logs=show_logs)
 
     @classmethod
-    def revoke_disk_access(cls, config: DeployConfigs, image_path: Path) -> None:
+    def _revoke_disk_access(
+        cls, config: DeployConfigs, image_path: Path
+    ) -> None:
         # Revoke access
         logger.info("Revoking access")
         cmd = [
@@ -346,7 +360,7 @@ class AzureCLI:
             "disk",
             "revoke-access",
             "-n",
-            config.vm.disk_name(image_path),
+            cls.get_disk_name(config, image_path),
             "-g",
             config.vm.resource_group,
         ]
@@ -355,9 +369,9 @@ class AzureCLI:
     @classmethod
     def upload_disk(cls, config: DeployConfigs, image_path: Path) -> None:
         """Upload disk image to Azure."""
-        sas_uri = cls.grant_disk_access(config, image_path)
-        cls.copy_disk(image_path, sas_uri, show_logs=config.show_logs)
-        cls.revoke_disk_access(config, image_path)
+        sas_uri = cls._grant_disk_access(config, image_path)
+        cls._copy_disk(image_path, sas_uri, show_logs=config.show_logs)
+        cls._revoke_disk_access(config, image_path)
 
     @classmethod
     def create_nsg(cls, config: DeployConfigs) -> None:
@@ -418,8 +432,22 @@ class AzureCLI:
         """Add all standard security rules."""
         rules = [
             ("AllowSSH", "100", "22", "Tcp", config.source_ip, "SSH rule"),
-            ("AllowAnyHTTPInbound", "101", "80", "Tcp", "*", "HTTP rule (TCP 80)"),
-            ("AllowAnyHTTPSInbound", "102", "443", "Tcp", "*", "HTTPS rule (TCP 443)"),
+            (
+                "AllowAnyHTTPInbound",
+                "101",
+                "80",
+                "Tcp",
+                "*",
+                "HTTP rule (TCP 80)",
+            ),
+            (
+                "AllowAnyHTTPSInbound",
+                "102",
+                "443",
+                "Tcp",
+                "*",
+                "HTTPS rule (TCP 443)",
+            ),
             ("TCP7878", "115", "7878", "Tcp", "*", "TCP 7878 rule"),
             ("TCP7936", "116", "7936", "Tcp", "*", "TCP 7936 rule"),
             ("TCP8545", "110", "8545", "Tcp", "*", "TCP 8545 rule"),
@@ -479,11 +507,18 @@ class AzureCLI:
         resource_group: str,
         vm_name: str,
         disk_name: str,
+        zone: str,
         lun: int = 10,
         show_logs: bool = False,
     ) -> None:
-        """Attach a data disk to a VM."""
-        logger.info(f"Attaching data disk {disk_name} to {vm_name} at LUN {lun}")
+        """Attach a data disk to a VM.
+
+        Note: zone parameter is unused for Azure, but included for API
+        consistency with GCP.
+        """
+        logger.info(
+            f"Attaching data disk {disk_name} to {vm_name} at LUN {lun}"
+        )
         cmd = [
             "az",
             "vm",
@@ -531,7 +566,10 @@ class AzureCLI:
         ip_name: str,
         show_logs: bool = False,
     ) -> None:
-        """Create a confidential VM without user-data (for BOB-style deployments)."""
+        """Create a confidential VM without user-data.
+
+        For BOB-style deployments.
+        """
         logger.info("Creating TDX-enabled confidential VM...")
         cmd = [
             "az",
@@ -565,7 +603,13 @@ class AzureCLI:
         cls.run_command(cmd, show_logs=show_logs)
 
     @classmethod
-    def create_vm(cls, config: DeployConfigs, image_path: Path, ip_name: str) -> None:
+    def create_vm(
+        cls,
+        config: DeployConfigs,
+        image_path: Path,
+        ip_name: str,
+        disk_name: str,
+    ) -> None:
         """Create the virtual machine with user-data."""
         user_data_file = cls.create_user_data_file(config)
 
@@ -582,7 +626,7 @@ class AzureCLI:
                 "--resource-group",
                 config.vm.resource_group,
                 "--attach-os-disk",
-                config.vm.disk_name(image_path),
+                disk_name,
                 "--security-type",
                 "ConfidentialVM",
                 "--enable-vtpm",
@@ -605,93 +649,137 @@ class AzureCLI:
             os.unlink(user_data_file)
             logger.info(f"Deleted temporary user-data file: {user_data_file}")
 
+    @classmethod
+    def get_vm_ip(cls, vm_name: str, resource_group: str, location: str) -> str:
+        """Get the public IP address of a VM with retry logic.
+
+        Azure may take a few moments after VM creation to populate IP info.
+        """
+        max_retries = 10
+        retry_delay = 3  # seconds
+
+        for attempt in range(max_retries):
+            result = subprocess.run(
+                ["az", "vm", "list-ip-addresses", "--name", vm_name],
+                capture_output=True,
+                text=True,
+            )
+
+            if result.returncode != 0:
+                raise RuntimeError(
+                    f"Failed to get IP address: {result.stderr.strip()}"
+                )
+
+            # Parse and return the IP address
+            vm_info = json.loads(result.stdout)
+
+            # Check if we got valid VM info
+            if not vm_info:
+                if attempt < max_retries - 1:
+                    msg = (
+                        f"VM info not available yet, "
+                        f"retrying in {retry_delay}s... "
+                        f"(attempt {attempt + 1}/{max_retries})"
+                    )
+                    logger.warning(msg)
+                    time.sleep(retry_delay)
+                    continue
+                msg = (
+                    f"Failed to get VM info for {vm_name} "
+                    f"after {max_retries} attempts"
+                )
+                raise RuntimeError(msg)
+
+            # Check if IP address is available
+            try:
+                return vm_info[0]["virtualMachine"]["network"][
+                    "publicIpAddresses"
+                ][0]["ipAddress"]
+            except (KeyError, IndexError) as e:
+                if attempt < max_retries - 1:
+                    msg = (
+                        f"IP address not available yet, "
+                        f"retrying in {retry_delay}s... "
+                        f"(attempt {attempt + 1}/{max_retries})"
+                    )
+                    logger.warning(msg)
+                    time.sleep(retry_delay)
+                    continue
+                raise RuntimeError(
+                    f"Failed to get IP address for {vm_name} after "
+                    f"{max_retries} attempts: {e}"
+                ) from e
+
+        raise RuntimeError(f"Failed to get IP address for {vm_name}")
+
+    @classmethod
+    def delete_vm(
+        cls,
+        vm_name: str,
+        resource_group: str,
+        location: str,
+        artifact: str,
+        home: str,
+    ) -> bool:
+        """Delete a VM and its associated resources.
+
+        Returns True if successful, False otherwise.
+        """
+        from yocto.cloud.cloud_parser import confirm
+        from yocto.utils.metadata import load_metadata, remove_vm_from_metadata
+
+        metadata = load_metadata(home)
+        resources = metadata.get("resources", {})
+
+        # Search for VM in azure cloud resources
+        cloud_key = cls.get_cloud_provider().value
+        cloud_resources = resources.get(cloud_key, {})
+        if vm_name not in cloud_resources:
+            logger.error(f"VM {vm_name} not found in {cloud_key} metadata")
+            return False
+
+        meta = cloud_resources[vm_name]
+        vm_resource_group = meta["vm"]["resourceGroup"]
+
+        prompt = f"Are you sure you want to delete VM {vm_name}"
+        if not confirm(prompt):
+            return False
+
+        logger.info(
+            f"Deleting VM {vm_name} in resource group {vm_resource_group}. "
+            "This takes a few minutes..."
+        )
+
+        cmd = [
+            "az",
+            "vm",
+            "delete",
+            "-g",
+            vm_resource_group,
+            "--name",
+            vm_name,
+            "--yes",
+        ]
+        process = subprocess.Popen(
+            args=" ".join(cmd),
+            shell=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        stdout, stderr = process.communicate()
+
+        if process.returncode != 0:
+            logger.error(f"Error when deleting VM:\n{stderr.strip()}")
+            return False
+
+        logger.info(f"Successfully deleted {vm_name}:\n{stdout}")
+        logger.info("Deleting associated disk...")
+
+        region = meta["vm"]["region"]
+        cls.delete_disk(vm_resource_group, vm_name, artifact, region)
+        remove_vm_from_metadata(vm_name, home, cls.get_cloud_provider().value)
+        return True
+
 
 # Common Argument Parser
-def create_base_parser(description: str) -> argparse.ArgumentParser:
-    """Create base argument parser with common arguments."""
-    parser = argparse.ArgumentParser(description=description)
-
-    # Common optional arguments
-    parser.add_argument(
-        "-r",
-        "--region",
-        type=str,
-        default=DEFAULT_REGION,
-        help=f"Azure region (default: {DEFAULT_REGION})",
-    )
-    parser.add_argument(
-        "--resource-group",
-        type=str,
-        default=DEFAULT_RESOURCE_GROUP,
-        help=f"Domain resource group (default: {DEFAULT_RESOURCE_GROUP})",
-    )
-    parser.add_argument(
-        "--domain-resource-group",
-        type=str,
-        default=DEFAULT_DOMAIN_RESOURCE_GROUP,
-        help=f"Domain resource group (default: {DEFAULT_DOMAIN_RESOURCE_GROUP})",
-    )
-    parser.add_argument(
-        "--domain-name",
-        type=str,
-        default=DEFAULT_DOMAIN_NAME,
-        help="Domain name (default: seismicdev.net)",
-    )
-    parser.add_argument(
-        "--certbot-email",
-        type=str,
-        default=DEFAULT_CERTBOT_EMAIL,
-        help=f"Certbot email (default: {DEFAULT_CERTBOT_EMAIL})",
-    )
-    parser.add_argument(
-        "--source-ip",
-        type=str,
-        help="Source IP address for SSH access. Defaults to this machine's IP",
-    )
-    parser.add_argument(
-        "--vm_size",
-        type=str,
-        # TODO: validate that it's a TDX machine
-        default=DEFAULT_VM_SIZE,
-        help=f"VM size (default: {DEFAULT_VM_SIZE})",
-    )
-    parser.add_argument(
-        "-v",
-        "--logs",
-        action="store_true",
-        help="If flagged, print build and/or deploy logs as they run",
-        default=False,
-    )
-    parser.add_argument(
-        "--code-path",
-        default="",
-        type=str,
-        help="Path to code relative to $HOME",
-    )
-
-    deploy_parser = parser.add_mutually_exclusive_group(required=True)
-
-    # Only one of these two
-    deploy_parser.add_argument(
-        "-a",
-        "--artifact",
-        type=str,
-        help=(
-            "If not running with --build, "
-            "use this to specify an artifact to deploy, "
-            "e.g. 'cvm-image-azure-tdx.rootfs-20241203182636.wic.vhd'"
-        ),
-    )
-    deploy_parser.add_argument(
-        "--ip-only",
-        action="store_true",
-        help="Only deploy genesis IPs",
-    )
-    return parser
-
-
-def confirm(what: str) -> bool:
-    inp = input(f"Are you sure you want to {what}? [y/N]\n")
-    if not inp.strip().lower() == "y":
-        raise ValueError(f"Aborting; will not {what}")
-    return True

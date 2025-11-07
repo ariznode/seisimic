@@ -6,13 +6,24 @@ Deploys flashbots-images bob VHD to Azure TDX confidential VM.
 Uses Azure deployment tools with BOB-specific configuration.
 """
 
+import argparse
 import json
 import logging
+import traceback
 from pathlib import Path
 
-from yocto.azure import AzureCLI, create_base_parser
-from yocto.cfg import DeploymentConfig
-from yocto.conf.conf import DeployConfigs
+from yocto.cloud.azure.api import AzureApi
+
+# Import defaults here to avoid circular imports
+from yocto.cloud.azure.defaults import (
+    DEFAULT_CERTBOT_EMAIL,
+    DEFAULT_DOMAIN_NAME,
+    DEFAULT_DOMAIN_RESOURCE_GROUP,
+    DEFAULT_REGION,
+    DEFAULT_RESOURCE_GROUP,
+    DEFAULT_VM_SIZE,
+)
+from yocto.config import DeployConfigs, DeploymentConfig, get_host_ip
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s"
@@ -20,7 +31,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 
-def create_bob_nsg_rules(config: DeployConfigs, az_cli: AzureCLI) -> None:
+def create_bob_nsg_rules(config: DeployConfigs, az_cli: AzureApi) -> None:
     """Create BOB searcher-specific network security group rules.
 
     Based on firewall table from bob-common/readme.md:
@@ -55,7 +66,14 @@ def create_bob_nsg_rules(config: DeployConfigs, az_cli: AzureCLI) -> None:
             "Port 10022 - Container SSH",
         ),
         # Searcher service ports (open to all)
-        ("AllowAttestation", "110", "8745", "Tcp", "*", "Port 8745 - CVM attestation"),
+        (
+            "AllowAttestation",
+            "110",
+            "8745",
+            "Tcp",
+            "*",
+            "Port 8745 - CVM attestation",
+        ),
         (
             "AllowSearcherInput",
             "111",
@@ -120,7 +138,7 @@ def deploy_bob_vm(
     logger.info(f"Config:\n{json.dumps(cfg.to_dict(), indent=2)}")
     logger.info("=" * 70)
 
-    az_cli = AzureCLI()
+    az_cli = AzureApi()
 
     # Step 1: Check dependencies
     logger.info("\n==> Step 1/9: Checking prerequisites...")
@@ -137,13 +155,17 @@ def deploy_bob_vm(
     ip_name = f"{deploy_cfg.vm.name}-ip"
 
     # Check if IP already exists
-    existing_ip = az_cli.get_existing_public_ip(ip_name, deploy_cfg.vm.resource_group)
+    existing_ip = az_cli.get_existing_public_ip(
+        ip_name, deploy_cfg.vm.resource_group
+    )
     if existing_ip:
         logger.info(f"    Using existing public IP: {existing_ip}")
         ip_address = existing_ip
     else:
         logger.info("    Creating new public IP...")
-        ip_address = az_cli.create_public_ip(ip_name, deploy_cfg.vm.resource_group)
+        ip_address = az_cli.create_public_ip(
+            ip_name, deploy_cfg.vm.resource_group, deploy_cfg.vm.location
+        )
         logger.info(f"    Created public IP: {ip_address}")
 
     # Step 4: Create and upload OS disk
@@ -151,16 +173,23 @@ def deploy_bob_vm(
 
     # Check if disk already exists and delete it to allow fresh upload
     if az_cli.disk_exists(deploy_cfg, image_path):
-        logger.warning("    Disk already exists, deleting to allow fresh upload...")
-        disk_name = deploy_cfg.vm.disk_name(image_path)
+        logger.warning(
+            "    Disk already exists, deleting to allow fresh upload..."
+        )
+        disk_name = az_cli.get_disk_name(deploy_cfg, image_path)
         az_cli.delete_disk(
-            deploy_cfg.vm.resource_group, deploy_cfg.vm.name, image_path.name
+            deploy_cfg.vm.resource_group,
+            deploy_cfg.vm.name,
+            image_path.name,
+            deploy_cfg.vm.location,
         )
         logger.info(f"    Deleted existing disk: {disk_name}")
 
     az_cli.create_disk(deploy_cfg, image_path)
 
-    logger.info("\n==> Step 5/9: Uploading VHD (this may take several minutes)...")
+    logger.info(
+        "\n==> Step 5/9: Uploading VHD (this may take several minutes)..."
+    )
     az_cli.upload_disk(deploy_cfg, image_path)
 
     # Step 6: Create persistent data disk
@@ -186,7 +215,7 @@ def deploy_bob_vm(
         vm_size=deploy_cfg.vm.size,
         resource_group=deploy_cfg.vm.resource_group,
         location=deploy_cfg.vm.location,
-        os_disk_name=deploy_cfg.vm.disk_name(image_path),
+        os_disk_name=az_cli.get_disk_name(deploy_cfg, image_path),
         nsg_name=deploy_cfg.vm.nsg_name,
         ip_name=ip_name,
         show_logs=cfg.show_logs,
@@ -198,6 +227,7 @@ def deploy_bob_vm(
         resource_group=deploy_cfg.vm.resource_group,
         vm_name=deploy_cfg.vm.name,
         disk_name=data_disk_name,
+        zone=deploy_cfg.vm.location,
         lun=10,  # BOB expects data disk at LUN 10
         show_logs=True,
     )
@@ -205,7 +235,9 @@ def deploy_bob_vm(
     return ip_address
 
 
-def print_next_steps(vm_name: str, ip_address: str, resource_group: str) -> None:
+def print_next_steps(
+    vm_name: str, ip_address: str, resource_group: str
+) -> None:
     """Print post-deployment instructions."""
     logger.info("\n" + "=" * 70)
     logger.info("DEPLOYMENT SUCCESSFUL! 🚀")
@@ -214,7 +246,9 @@ def print_next_steps(vm_name: str, ip_address: str, resource_group: str) -> None
     logger.info(f"  Name:       {vm_name}")
     logger.info(f"  Public IP:  {ip_address}")
     logger.info("\nNext Steps:")
-    logger.info("\n1. Wait for VM to boot (~2 minutes), then register your SSH key:")
+    logger.info(
+        "\n1. Wait for VM to boot (~2 minutes), then register your SSH key:"
+    )
     logger.info(
         f"   curl -X POST -d \"$(cut -d' ' -f2 ~/.ssh/id_ed25519.pub)\" http://{ip_address}:8080"
     )
@@ -238,10 +272,12 @@ def print_next_steps(vm_name: str, ip_address: str, resource_group: str) -> None
 
 
 def parse_bob_args():
-    """Parse BOB-specific command line arguments (matching genesis_deploy pattern)."""
-    parser = create_base_parser("BOB TEE Searcher Azure VM Deployment Tool")
+    """Parse BOB-specific command line arguments."""
+    parser = argparse.ArgumentParser(
+        description="BOB TEE Searcher Azure VM Deployment Tool"
+    )
 
-    # artifact is already defined in create_base_parser, just add BOB-specific args
+    # BOB-specific arguments
     parser.add_argument(
         "--name",
         "-n",
@@ -251,10 +287,48 @@ def parse_bob_args():
     )
 
     parser.add_argument(
+        "-a",
+        "--artifact",
+        type=str,
+        required=True,
+        help="VHD artifact to deploy (e.g., 'bob-searcher.vhd')",
+    )
+
+    parser.add_argument(
         "--data-disk-size",
         type=int,
         default=2048,
         help="Persistent data disk size in GB (default: 2048 = 2TB)",
+    )
+
+    # Azure-specific arguments
+    parser.add_argument(
+        "-r",
+        "--region",
+        type=str,
+        default=DEFAULT_REGION,
+        help=f"Azure region (default: {DEFAULT_REGION})",
+    )
+
+    parser.add_argument(
+        "--vm-size",
+        type=str,
+        default=DEFAULT_VM_SIZE,
+        help=f"VM size (default: {DEFAULT_VM_SIZE})",
+    )
+
+    parser.add_argument(
+        "--source-ip",
+        type=str,
+        help="Source IP address for SSH access (auto-detected if not provided)",
+    )
+
+    parser.add_argument(
+        "-v",
+        "--logs",
+        action="store_true",
+        help="Print deployment logs",
+        default=False,
     )
 
     return parser.parse_args()
@@ -262,15 +336,15 @@ def parse_bob_args():
 
 def main():
     """Main entry point."""
-    from yocto.conf.conf import get_host_ip
-
     args = parse_bob_args()
 
     # Validate VHD exists
     vhd_path = Path(args.artifact).expanduser()
     if not vhd_path.exists():
         logger.error(f"VHD file not found: {vhd_path}")
-        logger.error("Build it first: cd ~/flashbots-images && make build IMAGE=bob-l1")
+        logger.error(
+            "Build it first: cd ~/flashbots-images && make build IMAGE=bob-l1"
+        )
         exit(1)
 
     # Auto-detect source IP if not provided
@@ -284,14 +358,22 @@ def main():
         # Create config (similar to genesis but without domain/DNS)
         config = DeploymentConfig(
             vm_name=args.name,
-            region=args.region,
-            vm_size=args.vm_size,
+            region=args.region or DEFAULT_REGION,
+            vm_size=args.vm_size or DEFAULT_VM_SIZE,
             node=0,  # Not used for BOB
             record_name="",  # No DNS for BOB
             source_ip=source_ip,
             ip_only=False,
             artifact=args.artifact,
             home=str(Path.home()),
+            resource_group=DEFAULT_RESOURCE_GROUP,
+            # Not used for BOB
+            domain_resource_group=DEFAULT_DOMAIN_RESOURCE_GROUP,
+            # Not used for BOB
+            domain_name=DEFAULT_DOMAIN_NAME,
+            # Not used for BOB
+            certbot_email=DEFAULT_CERTBOT_EMAIL,
+            nsg_name=args.name,
             show_logs=args.logs,
         )
 
@@ -300,8 +382,6 @@ def main():
 
     except Exception as e:
         logger.error(f"Deployment failed: {e}")
-        import traceback
-
         traceback.print_exc()
         exit(1)
 

@@ -3,16 +3,16 @@ import signal
 import sys
 import traceback
 
-from yocto.artifact import delete_artifact
-from yocto.build import maybe_build
-from yocto.conf.conf import Configs
-from yocto.conf.logs import setup_logging
-from yocto.deploy import Deployer, delete_vm
+from yocto.config import Configs
+from yocto.deployment.deploy import Deployer, delete_vm
+from yocto.image.build import maybe_build
+from yocto.utils.artifact import delete_artifact
+from yocto.utils.logging_setup import setup_logging
 
 logger = logging.getLogger(__name__)
 
 
-def main():
+def main() -> int:
     setup_logging()
 
     configs = Configs.parse()
@@ -34,7 +34,6 @@ def main():
         configs=configs.deploy,
         image_path=image_path,
         measurements=measurements,
-        # TODO: old
         ip_name=configs.deploy.vm.resource_group,
         home=configs.home,
         show_logs=configs.show_logs,

@@ -4,12 +4,16 @@ import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 
-from yocto.artifact import artifact_timestamp
-from yocto.conf.conf import BuildConfigs, Configs
-from yocto.git import GitConfigs, update_git_bb
-from yocto.measurements import Measurements, generate_measurements
-from yocto.metadata import load_artifact_measurements, load_metadata, write_metadata
-from yocto.paths import BuildPaths
+from yocto.config import BuildConfigs, Configs
+from yocto.image.git import GitConfigs, update_git_bb
+from yocto.image.measurements import Measurements, generate_measurements
+from yocto.utils.artifact import artifact_timestamp
+from yocto.utils.metadata import (
+    load_artifact_measurements,
+    load_metadata,
+    write_metadata,
+)
+from yocto.utils.paths import BuildPaths
 
 logger = logging.getLogger(__name__)
 
@@ -38,13 +42,17 @@ def build_image(home: str, capture_output: bool = True) -> Path:
         text=True,
     )
     if build_result.returncode != 0:
-        err = build_result.stderr.strip() if build_result.stderr else "Unknown error"
+        err = (
+            build_result.stderr.strip()
+            if build_result.stderr
+            else "Unknown error"
+        )
         raise RuntimeError(f"Image build failed: {err}")
 
     # Find the latest built image
-    find_cmd = """
+    find_cmd = f"""
     find ~/yocto-manifests/reproducible-build/artifacts \
-    -name 'cvm-image-azure-tdx.rootfs-*.wic.vhd' \
+    -name '{BuildPaths.artifact_prefix()}-*.wic.vhd' \
     -type f -printf '%T@ %p\n' | sort -n | tail -1 | cut -f2- -d" "
     """
     find_result = subprocess.run(
@@ -59,10 +67,12 @@ def build_image(home: str, capture_output: bool = True) -> Path:
     image_path_str = find_result.stdout.strip()
     if not image_path_str:
         raise FileNotFoundError("No image file found in the expected directory")
+
     ts = artifact_timestamp(image_path_str)
     if (
         ts
-        < datetime.datetime.now().timestamp() - _MAX_ARTIFACT_AGE * _ONE_HOUR_IN_SECONDS
+        < datetime.datetime.now().timestamp()
+        - _MAX_ARTIFACT_AGE * _ONE_HOUR_IN_SECONDS
     ):
         raise RuntimeError(
             f"Most recently built image more than {_MAX_ARTIFACT_AGE} hours old"
@@ -91,7 +101,9 @@ class BuildOutput:
 
 
 class Builder:
-    def __init__(self, configs: BuildConfigs, home: str, show_logs: bool = True):
+    def __init__(
+        self, configs: BuildConfigs, home: str, show_logs: bool = True
+    ):
         self.configs = configs
         self.show_logs = show_logs
         self.home = home

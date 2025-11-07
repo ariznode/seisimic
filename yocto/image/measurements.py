@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
-from yocto.paths import BuildPaths
+from yocto.utils.paths import BuildPaths
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +26,9 @@ def generate_measurements(image_path: Path, home: str) -> Measurements:
     paths = BuildPaths(home)
     # Check if measured_boot_path and image_path exist
     if not paths.measured_boot.exists():
-        raise FileNotFoundError(f"Measured boot path not found: {paths.measured_boot}")
+        raise FileNotFoundError(
+            f"Measured boot path not found: {paths.measured_boot}"
+        )
     if not image_path.exists():
         raise FileNotFoundError(f"Image path not found: {image_path}")
 
@@ -43,11 +45,14 @@ def generate_measurements(image_path: Path, home: str) -> Measurements:
     go build -o measured-boot &&
     ./measured-boot {image_path} ../output.json &&
     cd ~ &&
-    jq '{jq_format}' {paths.measured_boot.parent}/output.json > {measurements_tmpfile}
+    jq '{jq_format}' {paths.measured_boot.parent}/output.json \\
+    > {measurements_tmpfile}
     """
 
     # Run the command without check=True and handle returncode manually
-    result = subprocess.run(measure_cmd, shell=True, capture_output=True, text=True)
+    result = subprocess.run(
+        measure_cmd, shell=True, capture_output=True, text=True
+    )
 
     # Check if the command failed and raise an error if necessary
     if result.returncode != 0:

@@ -4,7 +4,7 @@ from argparse import Namespace
 from dataclasses import dataclass
 from pathlib import Path
 
-from yocto.paths import BuildPaths
+from yocto.utils.paths import BuildPaths
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,9 @@ class GitConfig:
 
     def to_dict(self) -> dict[str, str]:
         if not self.commit:
-            raise ValueError("Cannot call to_dict() on GitConfig without commit")
+            raise ValueError(
+                "Cannot call to_dict() on GitConfig without commit"
+            )
         return {
             "branch": self.branch,
             "commit": self.commit,
@@ -64,8 +66,12 @@ class GitConfigs:
         )
 
 
-def run_command(cmd: str, cwd: Path | None = None) -> subprocess.CompletedProcess:
-    result = subprocess.run(cmd, shell=True, capture_output=True, text=True, cwd=cwd)
+def run_command(
+    cmd: str, cwd: Path | None = None
+) -> subprocess.CompletedProcess:
+    result = subprocess.run(
+        cmd, shell=True, capture_output=True, text=True, cwd=cwd
+    )
 
     if result.returncode != 0:
         raise RuntimeError(f"Command failed: {result.stderr.strip()}")
@@ -75,7 +81,11 @@ def run_command(cmd: str, cwd: Path | None = None) -> subprocess.CompletedProces
 
 def _extract(cmd: str, field: str) -> str:
     process = subprocess.Popen(
-        args=cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+        args=cmd,
+        shell=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
     )
     stdout, stderr = process.communicate()
 
@@ -113,7 +123,9 @@ def update_git_bb(
         commit_message = f"Update {bb_path.name} commit hash and branch"
 
     if not paths.meta_seismic.exists():
-        raise FileNotFoundError(f"Meta seismic path not found: {paths.meta_seismic}")
+        raise FileNotFoundError(
+            f"Meta seismic path not found: {paths.meta_seismic}"
+        )
 
     if not bb_path.exists():
         raise FileNotFoundError(f"{bb_path} not found")
@@ -140,7 +152,9 @@ def update_git_bb(
     run_command(f"git add {bb_pathname}", cwd=paths.meta_seismic)
 
     # Check if there are changes to commit
-    status_result = run_command("git status --porcelain", cwd=paths.meta_seismic)
+    status_result = run_command(
+        "git status --porcelain", cwd=paths.meta_seismic
+    )
     if status_result.stdout.strip():
         logger.info("Changes detected, committing...")
         run_command(f'git commit -m "{commit_message}"', cwd=paths.meta_seismic)

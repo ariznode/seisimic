@@ -4,8 +4,8 @@ import logging
 import os
 import re
 
-from yocto.metadata import load_metadata, remove_artifact_from_metadata
-from yocto.paths import BuildPaths
+from yocto.utils.metadata import load_metadata, remove_artifact_from_metadata
+from yocto.utils.paths import BuildPaths
 
 logger = logging.getLogger(__name__)
 
@@ -20,10 +20,11 @@ def _extract_timestamp(artifact: str):
     pattern = r".*?(\d{14}).*"
     match = re.search(pattern, artifact)
     if not match:
-        raise ValueError(
-            f"Invalid artifact name: {artifact}. "
-            'It should look like "cvm-image-azure-tdx.rootfs-20241202202935.wic.vhd"'
+        example = "cvm-image-azure-tdx.rootfs-20241202202935.wic.vhd"
+        msg = (
+            f"Invalid artifact name: {artifact}. " f'Should be like "{example}"'
         )
+        raise ValueError(msg)
     return match.group(1)
 
 
@@ -41,7 +42,7 @@ def artifact_timestamp(artifact: str) -> int:
 
 
 def _artifact_from_timestamp(timestamp: str) -> str:
-    return f"cvm-image-azure-tdx.rootfs-{timestamp}.wic.vhd"
+    return f"{BuildPaths.artifact_prefix()}-{timestamp}.wic.vhd"
 
 
 def parse_artifact(artifact_arg: str | None) -> str | None:
@@ -57,15 +58,27 @@ def parse_artifact(artifact_arg: str | None) -> str | None:
     return _artifact_from_timestamp(timestamp)
 
 
+def expect_artifact(artifact_arg: str) -> str:
+    artifact = parse_artifact(artifact_arg)
+    if artifact is None:
+        raise ValueError("Empty --artifact")
+    return artifact
+
+
 def delete_artifact(artifact: str, home: str):
     resources = load_metadata(home).get("resources", {})
-    deployed_to = [
-        rg for rg, resource in resources.items() if resource["artifact"] == artifact
-    ]
+
+    # Iterate over clouds and VMs to find where artifact is deployed
+    deployed_to = []
+    for cloud, cloud_resources in resources.items():
+        for vm_name, resource in cloud_resources.items():
+            if resource.get("artifact") == artifact:
+                deployed_to.append(f"{vm_name} ({cloud})")
+
     if deployed_to:
         confirm = input(
             f'\nThe artifact "{artifact}" is deployed to '
-            f"{len(deployed_to)} resource group(s):"
+            f"{len(deployed_to)} VM(s):"
             f"\n - {'\n - '.join(deployed_to)}\n\n"
             "Are you really sure you want to delete it? "
             "This will not delete the resources (y/n): "
@@ -85,5 +98,7 @@ def delete_artifact(artifact: str, home: str):
         logger.warning("Found no files associated with this artifact")
         return
 
-    logger.info(f"Deleted {files_deleted} files associated with artifact {artifact}")
+    logger.info(
+        f"Deleted {files_deleted} files associated with artifact {artifact}"
+    )
     remove_artifact_from_metadata(artifact, home)

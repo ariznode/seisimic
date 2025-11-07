@@ -2,7 +2,9 @@ import argparse
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Yocto Build and Deploy Automation")
+    parser = argparse.ArgumentParser(
+        description="Yocto Build and Deploy Automation"
+    )
 
     parser.add_argument(
         "--build",
@@ -11,7 +13,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--deploy", action="store_true", help="Deploy an image")
     parser.add_argument("--delete-vm", type=str, help="VM name to delete")
-    parser.add_argument("--delete-artifact", type=str, help="Artifact to delete")
+    parser.add_argument(
+        "--delete-artifact", type=str, help="Artifact to delete"
+    )
 
     parser.add_argument(
         "--artifact",
@@ -47,7 +51,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--enclave-commit",
         help=(
-            "Seismic Enclave git gommit hash. If not provided, does not change image"
+            "Seismic Enclave git gommit hash. "
+            "If not provided, does not change image"
         ),
     )
 
@@ -61,7 +66,10 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--sreth-commit",
-        help="Seismic Reth git commit hash. If not provided, does not change image",
+        help=(
+            "Seismic Reth git commit hash. "
+            "If not provided, does not change image"
+        ),
     )
 
     parser.add_argument(
@@ -80,7 +88,10 @@ def parse_args() -> argparse.Namespace:
     # Domain args
     parser.add_argument(
         "--domain-record",
-        help=("Domain record name (e.g. xxx.seismicdev.net). Required if deploying"),
+        help=(
+            "Domain record name (e.g. xxx.seismicdev.net). "
+            "Required if deploying"
+        ),
     )
     parser.add_argument(
         "--domain-name",

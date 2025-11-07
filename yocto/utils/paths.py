@@ -15,6 +15,10 @@ class BuildPaths:
     def artifacts(self) -> Path:
         return self.yocto_manifests / "reproducible-build/artifacts"
 
+    @staticmethod
+    def artifact_prefix() -> str:
+        return "cvm-image-azure-tdx.rootfs"
+
     @property
     def meta_seismic(self) -> Path:
         return self.home / "meta-seismic"

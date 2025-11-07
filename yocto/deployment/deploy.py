@@ -1,79 +1,49 @@
 import glob
-import json
 import logging
 import os
-import subprocess
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from yocto.azure import AzureCLI, confirm
-from yocto.conf.conf import DeployConfigs
-from yocto.measurements import Measurements, write_measurements_tmpfile
-from yocto.metadata import (
-    load_metadata,
-    remove_vm_from_metadata,
-    write_metadata,
-)
-from yocto.paths import BuildPaths
-from yocto.proxy import ProxyClient
+from yocto.cloud.cloud_config import CloudProvider
+from yocto.cloud.cloud_factory import get_cloud_api
+from yocto.config import DeployConfigs
+from yocto.deployment.proxy import ProxyClient
+from yocto.image.measurements import Measurements, write_measurements_tmpfile
+from yocto.utils.metadata import load_metadata, write_metadata
+from yocto.utils.paths import BuildPaths
 
 logger = logging.getLogger(__name__)
 
 
-def get_ip_address(vm_name: str) -> str:
-    """Get IP address of deployed VM. Raises an error if IP cannot be retrieved."""
-    result = subprocess.run(
-        ["az", "vm", "list-ip-addresses", "--name", vm_name],
-        capture_output=True,
-        text=True,
-    )
-
-    if result.returncode != 0:
-        raise RuntimeError(f"Failed to get IP address: {result.stderr.strip()}")
-
-    # Parse and return the IP address
-    vm_info = json.loads(result.stdout)
-    return vm_info[0]["virtualMachine"]["network"]["publicIpAddresses"][0]["ipAddress"]
-
-
 def delete_vm(vm_name: str, home: str) -> bool:
     """
-    Delete existing resource group if provided.
+    Delete existing VM using cloud-specific API.
     Returns True if successful, False otherwise.
     """
     metadata = load_metadata(home)
-    resources = metadata["resources"]
-    meta = resources[vm_name]
+    resources = metadata.get("resources", {})
+
+    # Search for VM in all clouds
+    meta = None
+    cloud_str = None
+    for cloud_key, cloud_resources in resources.items():
+        if vm_name in cloud_resources:
+            meta = cloud_resources[vm_name]
+            cloud_str = cloud_key
+            break
+
+    if not meta:
+        logger.error(f"VM {vm_name} not found in metadata")
+        return False
+
     resource_group = meta["vm"]["resourceGroup"]
-    prompt = f"Are you sure you want to delete VM {vm_name}"
-    if not confirm(prompt):
-        return False
+    region = meta["vm"]["region"]
+    artifact = meta["artifact"]
+    cloud_provider = CloudProvider(meta["vm"]["cloud"])
 
-    logger.info(
-        f"Deleting VM {vm_name} in resource group {resource_group}. "
-        "This takes a few minutes..."
-    )
-    # az vm delete -g yocto-testnet -n yocto-genesis-1
-    cmd = ["az", "vm", "delete", "-g", resource_group, "--name", vm_name, "--yes"]
-    process = subprocess.Popen(
-        args=" ".join(cmd),
-        shell=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    stdout, stderr = process.communicate()
-
-    if process.returncode != 0:
-        logger.error(f"Error when deleting VM:\n{stderr.strip()}")
-        return False
-
-    logger.info(f"Successfully deleted {vm_name}:\n{stdout}")
-    logger.info("Deleting associated disk...")
-    AzureCLI.delete_disk(resource_group, vm_name, meta["artifact"])
-    remove_vm_from_metadata(vm_name, home)
-    return True
+    cloud_api = get_cloud_api(cloud_provider)
+    return cloud_api.delete_vm(vm_name, resource_group, region, artifact, home)
 
 
 def deploy_image(
@@ -81,27 +51,41 @@ def deploy_image(
     configs: DeployConfigs,
     ip_name: str,
 ) -> str:
-    """Deploy image and return public IP. Raises an error if deployment fails."""
+    """Deploy image and return public IP.
+
+    Raises an error if deployment fails.
+    """
+    cloud_api = get_cloud_api(configs.vm.cloud)
 
     # Check if image_path exists
     if not image_path.exists():
         raise FileNotFoundError(f"Image path not found: {image_path}")
 
     # Disk
-    if AzureCLI.disk_exists(configs, image_path):
-        logger.error(f"Artifact {image_path.name} already exists for {configs.vm.name}")
-
-    AzureCLI.create_disk(configs, image_path)
-    AzureCLI.upload_disk(configs, image_path)
+    if cloud_api.disk_exists(configs, image_path):
+        logger.warning(
+            f"Disk for artifact {image_path.name} already exists for "
+            f"{configs.vm.name}, skipping creation"
+        )
+        # Get the disk name without creating it (for passing to create_vm)
+        disk_name = cloud_api.get_disk_name(configs, image_path)
+    else:
+        disk_name = cloud_api.create_disk(configs, image_path)
+    cloud_api.upload_disk(configs, image_path)
 
     # Security groups
-    AzureCLI.create_nsg(configs)
-    AzureCLI.create_standard_nsg_rules(configs)
+    cloud_api.create_nsg(configs)
+    cloud_api.create_standard_nsg_rules(configs)
 
     # Actually create the VM
-    AzureCLI.create_vm(configs, image_path, ip_name)
+    cloud_api.create_vm(configs, image_path, ip_name, disk_name)
 
-    return get_ip_address(configs.vm.name)
+    # Get the VM's IP address
+    return cloud_api.get_vm_ip(
+        vm_name=configs.vm.name,
+        resource_group=configs.vm.resource_group,
+        location=configs.vm.location,
+    )
 
 
 @dataclass
@@ -114,8 +98,13 @@ class DeployOutput:
     def update_deploy_metadata(self):
         metadata = load_metadata(self.home)
         if "resources" not in metadata:
-            metadata["resources"] = {}
-        metadata["resources"][self.configs.vm.name] = {
+            metadata["resources"] = {"azure": {}, "gcp": {}}
+
+        cloud = self.configs.vm.cloud
+        if cloud not in metadata["resources"]:
+            metadata["resources"][cloud] = {}
+
+        metadata["resources"][cloud][self.configs.vm.name] = {
             "artifact": self.artifact,
             "public_ip": self.public_ip,
             "domain": self.configs.domain.to_dict(),
@@ -169,11 +158,14 @@ class Deployer:
     def find_latest_image(self) -> Path:
         """Find the most recently built image"""
         pattern = str(
-            BuildPaths(self.home).artifacts / "cvm-image-azure-tdx.rootfs-*.wic.vhd"
+            BuildPaths(self.home).artifacts
+            / "cvm-image-azure-tdx.rootfs-*.wic.vhd"
         )
         image_files = glob.glob(pattern)
         if not image_files:
-            raise FileNotFoundError("No existing images found in artifacts directory")
+            raise FileNotFoundError(
+                "No existing images found in artifacts directory"
+            )
 
         latest_image = max(image_files, key=lambda x: Path(x).stat().st_mtime)
         logger.info(f"Found latest image: {latest_image}")
