@@ -13,10 +13,11 @@ First install python3
 
 Then create a virtualenv:
 
-`python3 -m venv venv`
+```bash
+python3 -m venv venv
+```
 
-`source venv/bin/activate`
-
-`uv`:
-`pip install uv`
+```bash
+source venv/bin/activate
+```
 
