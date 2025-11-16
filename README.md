@@ -1,8 +1,13 @@
-# deploy
-Seismic's home base for deploying
+# Recruitmens
+
+- CPU: 4+ vCPUs
+
+- Memory: 16+GB RAM
+
+- Storage: 1TB
 
 
-## Install python dependencies
+## Install Dependencies
 
 First install python3
 
@@ -10,8 +15,8 @@ Then create a virtualenv:
 
 `python3 -m venv venv`
 
-Source it: `source venv/bin/activate`
+`source venv/bin/activate`
 
-Install `uv`:
+`uv`:
 `pip install uv`
 
